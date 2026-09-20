@@ -16,6 +16,19 @@ public class UltronNotificationListener extends NotificationListenerService {
     private static final String BRIDGE_URL =
             "http://127.0.0.1:8765/notification";
 
+@Override
+public void onListenerConnected() {
+    super.onListenerConnected();
+
+    android.widget.Toast.makeText(
+            this,
+            "ULTRON listener CONNECTED",
+            android.widget.Toast.LENGTH_LONG
+    ).show();
+
+    Log.d(TAG, "ULTRON NotificationListener connected");
+}
+
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
 
