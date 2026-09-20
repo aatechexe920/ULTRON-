@@ -6,145 +6,424 @@ import android.service.notification.StatusBarNotification;
 import android.os.Bundle;
 import android.util.Log;
 
+import org.json.JSONObject;
+
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class UltronNotificationListener extends NotificationListenerService {
 
     private static final String TAG = "ULTRON";
+
     private static final String BRIDGE_URL =
             "http://127.0.0.1:8765/notification";
 
-@Override
-public void onListenerConnected() {
-    super.onListenerConnected();
+    /*
+     * Remembers what ULTRON has already seen for each Android
+     * notification.
+     *
+     * Key = app + notification ID + notification tag
+     */
+    private final Map<String, Set<String>> previousContent =
+            new HashMap<>();
 
-    android.widget.Toast.makeText(
-            this,
-            "ULTRON listener CONNECTED",
-            android.widget.Toast.LENGTH_LONG
-    ).show();
 
-    Log.d(TAG, "ULTRON NotificationListener connected");
-}
+    @Override
+    public void onListenerConnected() {
+
+        super.onListenerConnected();
+
+        Log.d(TAG, "ULTRON listener CONNECTED");
+    }
+
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
 
-android.widget.Toast.makeText(
-        this,
-        "ULTRON received: " + sbn.getPackageName(),
-        android.widget.Toast.LENGTH_LONG
-).show();
+        try {
 
-        String packageName = sbn.getPackageName();
+            Notification notification = sbn.getNotification();
 
-        Log.d(TAG, "Notification received from: " + packageName);
+            if (notification == null) {
+                return;
+            }
 
-        Notification notification = sbn.getNotification();
+            Bundle extras = notification.extras;
 
-        if (notification == null) {
-            return;
-        }
+            if (extras == null) {
+                return;
+            }
 
-        Bundle extras = notification.extras;
 
-        String title = "";
-        String text = "";
+            String packageName = sbn.getPackageName();
 
-        if (extras != null) {
+            String title = "";
 
             CharSequence titleValue =
                     extras.getCharSequence(Notification.EXTRA_TITLE);
-
-            CharSequence textValue =
-                    extras.getCharSequence(Notification.EXTRA_TEXT);
 
             if (titleValue != null) {
                 title = titleValue.toString();
             }
 
-            if (textValue != null) {
-                text = textValue.toString();
+
+            /*
+             * Build a list containing the actual notification
+             * content lines.
+             */
+            List<String> currentLines =
+                    extractNotificationLines(extras);
+
+
+            if (currentLines.isEmpty()) {
+
+                CharSequence textValue =
+                        extras.getCharSequence(Notification.EXTRA_TEXT);
+
+                if (textValue != null) {
+
+                    String text = textValue.toString().trim();
+
+                    if (!text.isEmpty()) {
+                        currentLines.add(text);
+                    }
+                }
+            }
+
+
+            /*
+             * Unique key for this Android notification.
+             */
+            String notificationKey =
+                    packageName
+                            + "|"
+                            + sbn.getId()
+                            + "|"
+                            + String.valueOf(sbn.getTag());
+
+
+            /*
+             * Get what ULTRON saw previously.
+             */
+            Set<String> oldLines =
+                    previousContent.get(notificationKey);
+
+
+            /*
+             * First time seeing this notification:
+             * send the current content.
+             */
+            if (oldLines == null) {
+
+                oldLines = new HashSet<>();
+
+                previousContent.put(
+                        notificationKey,
+                        oldLines
+                );
+
+                for (String line : currentLines) {
+
+                    if (!line.isEmpty()) {
+                        oldLines.add(normalize(line));
+                    }
+                }
+
+                sendNotification(
+                        packageName,
+                        title,
+                        joinLines(currentLines)
+                );
+
+                return;
+            }
+
+
+            /*
+             * Notification already existed.
+             *
+             * Find ONLY lines that weren't present before.
+             */
+            List<String> newLines =
+                    new ArrayList<>();
+
+
+            for (String line : currentLines) {
+
+                String normalized =
+                        normalize(line);
+
+                if (normalized.isEmpty()) {
+                    continue;
+                }
+
+                if (!oldLines.contains(normalized)) {
+
+                    newLines.add(line);
+
+                    oldLines.add(normalized);
+                }
+            }
+
+
+            /*
+             * Nothing new was added.
+             *
+             * This prevents Android from repeatedly sending
+             * the same old notification contents to ULTRON.
+             */
+            if (newLines.isEmpty()) {
+
+                Log.d(
+                        TAG,
+                        "No new notification content: "
+                                + packageName
+                );
+
+                return;
+            }
+
+
+            /*
+             * Send ONLY the new notification content.
+             */
+            sendNotification(
+                    packageName,
+                    title,
+                    joinLines(newLines)
+            );
+
+
+        } catch (Exception e) {
+
+            Log.e(
+                    TAG,
+                    "Notification processing error",
+                    e
+            );
+        }
+    }
+
+
+    /*
+     * Extract notification lines.
+     *
+     * Android apps such as Telegram and WhatsApp can use
+     * notification styles that contain multiple lines.
+     */
+    private List<String> extractNotificationLines(
+            Bundle extras
+    ) {
+
+        List<String> lines =
+                new ArrayList<>();
+
+
+        /*
+         * Standard Android notification lines.
+         */
+        CharSequence[] textLines =
+                extras.getCharSequenceArray(
+                        Notification.EXTRA_TEXT_LINES
+                );
+
+
+        if (textLines != null) {
+
+            for (CharSequence value : textLines) {
+
+                if (value == null) {
+                    continue;
+                }
+
+                String text =
+                        value.toString().trim();
+
+                if (!text.isEmpty()) {
+                    lines.add(text);
+                }
             }
         }
 
-        sendToTermux(packageName, title, text);
+
+        /*
+         * If EXTRA_TEXT_LINES wasn't available,
+         * use the normal notification text.
+         */
+        if (lines.isEmpty()) {
+
+            CharSequence text =
+                    extras.getCharSequence(
+                            Notification.EXTRA_TEXT
+                    );
+
+            if (text != null) {
+
+                String value =
+                        text.toString().trim();
+
+                if (!value.isEmpty()) {
+                    lines.add(value);
+                }
+            }
+        }
+
+
+        return lines;
     }
 
-    @Override
-    public void onNotificationRemoved(StatusBarNotification sbn) {
 
-        Log.d(TAG,
-                "Notification removed from: "
-                        + sbn.getPackageName());
+    /*
+     * Normalize text so tiny formatting differences don't
+     * make Android's old notification look like a new one.
+     */
+    private String normalize(String text) {
+
+        if (text == null) {
+            return "";
+        }
+
+        return text
+                .trim()
+                .replaceAll("\\s+", " ");
     }
 
-    private void sendToTermux(
+
+    /*
+     * Join multiple new notification lines into one message.
+     */
+    private String joinLines(List<String> lines) {
+
+        StringBuilder result =
+                new StringBuilder();
+
+        for (String line : lines) {
+
+            if (line == null) {
+                continue;
+            }
+
+            String value =
+                    line.trim();
+
+            if (value.isEmpty()) {
+                continue;
+            }
+
+            if (result.length() > 0) {
+                result.append("\n");
+            }
+
+            result.append(value);
+        }
+
+        return result.toString();
+    }
+
+
+    /*
+     * Send the NEW content to the Termux bridge.
+     */
+    private void sendNotification(
             String packageName,
             String title,
-            String text) {
-
-        final String finalPackage = packageName;
-        final String finalTitle = title;
-        final String finalText = text;
+            String text
+    ) {
 
         new Thread(() -> {
 
-            HttpURLConnection connection = null;
+            HttpURLConnection connection =
+                    null;
 
             try {
 
-                URL url = new URL(BRIDGE_URL);
+                JSONObject json =
+                        new JSONObject();
+
+                json.put(
+                        "package",
+                        packageName
+                );
+
+                json.put(
+                        "title",
+                        title
+                );
+
+                json.put(
+                        "text",
+                        text
+                );
+
+
+                URL url =
+                        new URL(BRIDGE_URL);
 
                 connection =
-                        (HttpURLConnection) url.openConnection();
+                        (HttpURLConnection)
+                                url.openConnection();
 
-                connection.setRequestMethod("POST");
-                connection.setDoOutput(true);
-                connection.setConnectTimeout(3000);
-                connection.setReadTimeout(3000);
+                connection.setRequestMethod(
+                        "POST"
+                );
+
+                connection.setConnectTimeout(
+                        3000
+                );
+
+                connection.setReadTimeout(
+                        3000
+                );
+
+                connection.setDoOutput(
+                        true
+                );
 
                 connection.setRequestProperty(
                         "Content-Type",
                         "application/json"
                 );
 
-                String json =
-                        "{"
-                        + "\"package\":\""
-                        + escapeJson(finalPackage)
-                        + "\","
-                        + "\"title\":\""
-                        + escapeJson(finalTitle)
-                        + "\","
-                        + "\"text\":\""
-                        + escapeJson(finalText)
-                        + "\""
-                        + "}";
 
-                OutputStream output =
-                        connection.getOutputStream();
+                byte[] data =
+                        json.toString()
+                                .getBytes(
+                                        StandardCharsets.UTF_8
+                                );
 
-                output.write(json.getBytes("UTF-8"));
-                output.flush();
-                output.close();
+
+                try (OutputStream output =
+                             connection.getOutputStream()) {
+
+                    output.write(data);
+                    output.flush();
+                }
+
 
                 int responseCode =
                         connection.getResponseCode();
 
+
                 Log.d(
                         TAG,
-                        "Termux bridge response: "
+                        "Notification sent. HTTP "
                                 + responseCode
                 );
+
 
             } catch (Exception e) {
 
                 Log.e(
                         TAG,
-                        "Could not send notification to Termux",
+                        "Failed to send notification",
                         e
                 );
 
@@ -156,19 +435,5 @@ android.widget.Toast.makeText(
             }
 
         }).start();
-    }
-
-    private String escapeJson(String value) {
-
-        if (value == null) {
-            return "";
-        }
-
-        return value
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
     }
 }
