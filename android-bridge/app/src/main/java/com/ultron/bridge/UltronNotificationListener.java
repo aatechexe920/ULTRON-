@@ -19,6 +19,12 @@ public class UltronNotificationListener extends NotificationListenerService {
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
 
+android.widget.Toast.makeText(
+        this,
+        "ULTRON received: " + sbn.getPackageName(),
+        android.widget.Toast.LENGTH_LONG
+).show();
+
         String packageName = sbn.getPackageName();
 
         Log.d(TAG, "Notification received from: " + packageName);
